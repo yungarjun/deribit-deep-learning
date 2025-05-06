@@ -4,6 +4,7 @@ import pyarrow.parquet as pq
 from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 import torch
+import matplotlib.pyplot as plt
 
 # Read in raw parquet
 table = pq.read_table("/Users/167011/Documents/MQF/Thesis/Deribit_Data/deribit_options_2025-01-30_100k_rows.parquet")
@@ -37,18 +38,21 @@ df['m'] = np.log(df['strike'] / df['underlying_price'])
 # # Choose tau grid based on Kmeans clustering
 
 unique_taus = np.sort(df['tau'].unique()).reshape(-1,1)
+# Finding different clusters of tau  (time to expiry)
 tau_kmeans = KMeans(n_clusters=7, random_state=0).fit(unique_taus)
+# Get the cluster centers and sort them
 tau_grid = np.sort(tau_kmeans.cluster_centers_.flatten())
+# Assign each quote to a cluster
 df['tau_cluster'] = tau_kmeans.predict(df[['tau']])
 
-
+# Moneyness grid for each tau (ttm)
 m_grid = {}
 for cluster_label, tau in enumerate(tau_grid):
     # Select all rows in that clust
     subset = df[df['tau_cluster'] == cluster_label]
     # Get min and max m for that cluster
     m_lo, m_hi = np.percentile(subset['m'], [1, 99])
-    m_grid[tau] = np.linspace(m_lo, m_hi, 10)
+    m_grid[tau] = np.linspace(m_lo, m_hi, 10) # here we are assuming each moneyness point is equally likely
 
 print(tau_grid)
 
@@ -134,5 +138,32 @@ surf_arr = C_interp.to_numpy()              # or C.values
 surf_tensor = torch.from_numpy(surf_arr).float()
 # print(surf_tensor.shape[0])
 
-torch.save(surf_tensor, "btc_surfaces.pt")
+# torch.save(surf_tensor, "btc_surfaces.pt")
 
+# 1) compute low/high m for each τ
+taus = tau_grid
+m_lo = np.array([m_grid[t].min() for t in taus])
+m_hi = np.array([m_grid[t].max() for t in taus])
+
+# 2) build polygon coordinates in (m, τ)-space
+poly_m = np.concatenate([m_lo, m_hi[::-1]])
+poly_tau = np.concatenate([taus, taus[::-1]])
+
+# 3) collect all lattice nodes
+nodes = np.vstack([
+    np.column_stack([m_grid[t], np.full_like(m_grid[t], t)])
+    for t in taus
+])
+
+# 4) plot
+plt.figure(figsize=(6,4))
+plt.fill(poly_m, poly_tau, color='lightblue', alpha=0.5, label=r'$\mathcal{R}_{\rm liq}$')
+plt.scatter(nodes[:,0], nodes[:,1], color='k', s=30, label=r'$\mathcal{L}_{\rm liq}$')
+
+plt.xlabel(r'$m = \ln(K/S)$')
+plt.ylabel(r'$\tau$ (years)')
+plt.title('Liquid Range and Lattice Nodes')
+plt.legend(loc='upper right')
+plt.grid(False)
+plt.tight_layout()
+plt.show()
