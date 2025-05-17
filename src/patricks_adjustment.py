@@ -47,7 +47,7 @@ model = SurfaceSDE(N).to(device)
 
 # 4) Training setup
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
-n_epochs = 50
+n_epochs = 100
 batch_size = 32
 dt = 1.0  # assume unit time-step
 

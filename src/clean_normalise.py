@@ -109,29 +109,26 @@ C_interp = (
     .bfill()                              # fill any leading NaNs at the start
 )
 
+# We now extract the timesteps between observed option snapshot
+timestamps = C_interp.index.to_series()
+
+# Compute raw delta t in seconds (or fractions of a second) between each row
+dt_secs = timestamps.diff().dt.total_seconds().to_numpy()
+
+# the first value for dt is na so we just assume that its the same as the next value
+dt_secs[0] = dt_secs[1]
+
+dt_secs = dt_secs.astype(np.float32)
+
+# Convert to tensor
+dt_tensor = torch.from_numpy(dt_secs).float()
+
+# Save
+torch.save(dt_tensor, "dt.pt")
+
+
 # Very no zeros remain 
 print(C_interp.isna().sum().sum()) # should be 0
-
-# Create vector of underlying prices, log price and log return
-
-# keep underlying_info as a DataFrame with the price column
-underlying_info = (
-    df
-    .drop_duplicates('timestamp')
-    .sort_values('timestamp')
-    .reset_index(drop=True)
-    [['underlying_price']]           # <-- still a DataFrame
-)
-
-underlying_info['log_return'] = np.log(
-    underlying_info['underlying_price']
-    / underlying_info['underlying_price'].shift(1)
-)
-underlying_info['log_price'] = np.log(
-    underlying_info['underlying_price']
-)
-
-
 
 surf_arr = C_interp.to_numpy()              # or C.values
 # print(surf_arr)
@@ -155,15 +152,35 @@ nodes = np.vstack([
     for t in taus
 ])
 
-# 4) plot
-plt.figure(figsize=(6,4))
-plt.fill(poly_m, poly_tau, color='lightblue', alpha=0.5, label=r'$\mathcal{R}_{\rm liq}$')
-plt.scatter(nodes[:,0], nodes[:,1], color='k', s=30, label=r'$\mathcal{L}_{\rm liq}$')
+# # 4) plot
+# plt.figure(figsize=(6,4))
+# plt.fill(poly_m, poly_tau, color='lightblue', alpha=0.5, label=r'$\mathcal{R}_{\rm liq}$')
+# plt.scatter(nodes[:,0], nodes[:,1], color='k', s=30, label=r'$\mathcal{L}_{\rm liq}$')
 
-plt.xlabel(r'$m = \ln(K/S)$')
-plt.ylabel(r'$\tau$ (years)')
-plt.title('Liquid Range and Lattice Nodes')
-plt.legend(loc='upper right')
-plt.grid(False)
-plt.tight_layout()
-plt.show()
+# plt.xlabel(r'$m = \ln(K/S)$')
+# plt.ylabel(r'$\tau$ (years)')
+# plt.title('Liquid Range and Lattice Nodes')
+# plt.legend(loc='upper right')
+# plt.grid(False)
+# plt.tight_layout()
+# plt.show()
+
+
+# Create vector of underlying prices, log price and log return
+
+# keep underlying_info as a DataFrame with the price column
+underlying_info = (
+    df
+    .drop_duplicates('timestamp')
+    .sort_values('timestamp')
+    .reset_index(drop=True)
+    [['underlying_price']]           # <-- still a DataFrame
+)
+
+underlying_info['log_return'] = np.log(
+    underlying_info['underlying_price']
+    / underlying_info['underlying_price'].shift(1)
+)
+underlying_info['log_price'] = np.log(
+    underlying_info['underlying_price']
+)
