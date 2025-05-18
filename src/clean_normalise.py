@@ -39,9 +39,9 @@ df['m'] = np.log(df['strike'] / df['underlying_price'])
 
 unique_taus = np.sort(df['tau'].unique()).reshape(-1,1)
 # Finding different clusters of tau  (time to expiry)
-tau_kmeans = KMeans(n_clusters=7, random_state=0).fit(unique_taus)
+tau_kmeans = KMeans(n_clusters=5, random_state=0).fit(unique_taus)
 # Get the cluster centers and sort them
-tau_grid = np.sort(tau_kmeans.cluster_centers_.flatten())
+tau_grid = (tau_kmeans.cluster_centers_.flatten())
 # Assign each quote to a cluster
 df['tau_cluster'] = tau_kmeans.predict(df[['tau']])
 
@@ -91,6 +91,8 @@ best = (
 
 best = best[['timestamp', 'node_idx', 'lattice_tau', 'lattice_m', 'mid_price']]
 
+best['timestamp'] = pd.to_datetime(best['timestamp'])
+
 # Pivot to get a sparse lattice DataFrame (NaNs left in place)
 C_sparse = best.pivot(
     index = 'timestamp',
@@ -135,52 +137,31 @@ surf_arr = C_interp.to_numpy()              # or C.values
 surf_tensor = torch.from_numpy(surf_arr).float()
 # print(surf_tensor.shape[0])
 
-# torch.save(surf_tensor, "btc_surfaces.pt")
+torch.save(surf_tensor, "btc_surfaces.pt")
 
-# 1) compute low/high m for each τ
-taus = tau_grid
-m_lo = np.array([m_grid[t].min() for t in taus])
-m_hi = np.array([m_grid[t].max() for t in taus])
+# 1) sort tau→m_grid
+sorted_items = sorted(m_grid.items(), key=lambda kv: kv[0])
+taus_s, m_ranges = zip(*sorted_items)
+m_lo_s = np.array([rng.min() for rng in m_ranges])
+m_hi_s = np.array([rng.max() for rng in m_ranges])
 
-# 2) build polygon coordinates in (m, τ)-space
-poly_m = np.concatenate([m_lo, m_hi[::-1]])
-poly_tau = np.concatenate([taus, taus[::-1]])
+# 2) plot
+plt.figure(figsize=(6,4))
+plt.fill_betweenx(taus_s, m_lo_s, m_hi_s,
+                  color='lightblue', alpha=0.5,
+                  label=r'$\mathcal{R}_{\rm liq}$')
 
-# 3) collect all lattice nodes
-nodes = np.vstack([
+# scatter all nodes if you like
+all_nodes = np.vstack([
     np.column_stack([m_grid[t], np.full_like(m_grid[t], t)])
-    for t in taus
+    for t in taus_s
 ])
+plt.scatter(all_nodes[:,0], all_nodes[:,1],
+            color='k', s=30, label=r'$\mathcal{L}_{\rm liq}$')
 
-# # 4) plot
-# plt.figure(figsize=(6,4))
-# plt.fill(poly_m, poly_tau, color='lightblue', alpha=0.5, label=r'$\mathcal{R}_{\rm liq}$')
-# plt.scatter(nodes[:,0], nodes[:,1], color='k', s=30, label=r'$\mathcal{L}_{\rm liq}$')
-
-# plt.xlabel(r'$m = \ln(K/S)$')
-# plt.ylabel(r'$\tau$ (years)')
-# plt.title('Liquid Range and Lattice Nodes')
-# plt.legend(loc='upper right')
-# plt.grid(False)
-# plt.tight_layout()
-# plt.show()
-
-
-# Create vector of underlying prices, log price and log return
-
-# keep underlying_info as a DataFrame with the price column
-underlying_info = (
-    df
-    .drop_duplicates('timestamp')
-    .sort_values('timestamp')
-    .reset_index(drop=True)
-    [['underlying_price']]           # <-- still a DataFrame
-)
-
-underlying_info['log_return'] = np.log(
-    underlying_info['underlying_price']
-    / underlying_info['underlying_price'].shift(1)
-)
-underlying_info['log_price'] = np.log(
-    underlying_info['underlying_price']
-)
+plt.xlabel(r'$m = \ln(K/S)$')
+plt.ylabel(r'$\tau$ (years)')
+plt.title('Liquid Range and Lattice Nodes')
+plt.legend(loc='upper right')
+plt.tight_layout()
+plt.show()
