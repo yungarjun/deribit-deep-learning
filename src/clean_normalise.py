@@ -111,6 +111,13 @@ C_interp = (
     .bfill()                              # fill any leading NaNs at the start
 )
 
+total_nans = C_interp.isna().sum().sum()
+print(f"Total NaNs in C_interp: {total_nans:,}")
+
+# Which node-indices never got any data at all?
+all_nan_cols = C_interp.columns[C_interp.isna().all()]
+print("Nodes never observed:", list(all_nan_cols))
+
 # We now extract the timesteps between observed option snapshot
 timestamps = C_interp.index.to_series()
 
@@ -139,29 +146,79 @@ surf_tensor = torch.from_numpy(surf_arr).float()
 
 torch.save(surf_tensor, "btc_surfaces.pt")
 
-# 1) sort tau→m_grid
-sorted_items = sorted(m_grid.items(), key=lambda kv: kv[0])
-taus_s, m_ranges = zip(*sorted_items)
-m_lo_s = np.array([rng.min() for rng in m_ranges])
-m_hi_s = np.array([rng.max() for rng in m_ranges])
+# # 1) sort tau→m_grid
+# sorted_items = sorted(m_grid.items(), key=lambda kv: kv[0])
+# taus_s, m_ranges = zip(*sorted_items)
+# m_lo_s = np.array([rng.min() for rng in m_ranges])
+# m_hi_s = np.array([rng.max() for rng in m_ranges])
 
-# 2) plot
-plt.figure(figsize=(6,4))
-plt.fill_betweenx(taus_s, m_lo_s, m_hi_s,
-                  color='lightblue', alpha=0.5,
-                  label=r'$\mathcal{R}_{\rm liq}$')
+# # 2) plot
+# plt.figure(figsize=(6,4))
+# plt.fill_betweenx(taus_s, m_lo_s, m_hi_s,
+#                   color='lightblue', alpha=0.5,
+#                   label=r'$\mathcal{R}_{\rm liq}$')
 
-# scatter all nodes if you like
-all_nodes = np.vstack([
-    np.column_stack([m_grid[t], np.full_like(m_grid[t], t)])
-    for t in taus_s
-])
-plt.scatter(all_nodes[:,0], all_nodes[:,1],
-            color='k', s=30, label=r'$\mathcal{L}_{\rm liq}$')
+# # scatter all nodes if you like
+# all_nodes = np.vstack([
+#     np.column_stack([m_grid[t], np.full_like(m_grid[t], t)])
+#     for t in taus_s
+# ])
+# plt.scatter(all_nodes[:,0], all_nodes[:,1],
+#             color='k', s=30, label=r'$\mathcal{L}_{\rm liq}$')
 
-plt.xlabel(r'$m = \ln(K/S)$')
-plt.ylabel(r'$\tau$ (years)')
-plt.title('Liquid Range and Lattice Nodes')
-plt.legend(loc='upper right')
+# plt.xlabel(r'$m = \ln(K/S)$')
+# plt.ylabel(r'$\tau$ (years)')
+# plt.title('Liquid Range and Lattice Nodes')
+# plt.legend(loc='upper right')
+# plt.tight_layout()
+# plt.show()
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
+from mpl_toolkits.mplot3d import Axes3D
+
+# — Assumes you still have these in memory —
+# C_interp:    pandas.DataFrame indexed by timestamp, columns = node_idx ints
+# surf_tensor: torch.Tensor [T, N_present]
+# nodes:       numpy.ndarray [N_all, 2]
+
+# 1) Extract only the nodes present in C_interp
+col_idx       = C_interp.columns.to_numpy()      # length N_present
+nodes_present = nodes[col_idx]                   # shape (N_present, 2)
+taus_p = nodes_present[:,0]
+ms_p   = nodes_present[:,1]
+
+# 2) Choose the time‐slice you want to plot
+t0_idx = 0  # or any index 0 <= t0_idx < T
+z = surf_tensor[t0_idx].cpu().numpy()            # [N_present]
+
+# 3) Build a triangulation for your irregular grid
+tri = mtri.Triangulation(taus_p, ms_p)
+
+# 4) Plot with your desired “camera” angle
+fig = plt.figure(figsize=(7,5))
+ax  = fig.add_subplot(111, projection='3d')
+
+# draw the surface
+surf = ax.plot_trisurf(
+    tri, z,
+    cmap='viridis',
+    edgecolor='none',
+    linewidth=0,
+    alpha=0.9
+)
+
+# set labels
+ax.set_xlabel('τ (years to expiry)')
+ax.set_ylabel('m = log(K/F)')
+ax.set_zlabel('Call Price')
+
+# **Custom view angle** (elev, azim) – tweak these until you get the look you want
+# For example, elev=25° above, azim=210° around:
+ax.view_init(elev=25, azim=210)
+
+ax.set_title(f'Call‐Price Surface at t={t0_idx}')
+
 plt.tight_layout()
 plt.show()
