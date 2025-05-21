@@ -10,9 +10,9 @@ import cvxpy as cp
 
 
 # Read in raw parquet
-table = pq.read_table("/Users/167011/Documents/MQF/Thesis/Deribit_Data/deribit_options_2025-01-30_100k_rows.parquet")
+# table = pq.read_table("/Users/167011/Documents/MQF/Thesis/Deribit_Data/deribit_options_2025-01-30_100k_rows.parquet")
 
-# table = pq.read_table("/Users/arjunshah/Documents/UTS/Thesis/neural-sdes/data/deribit_options_2025-01-30_100k_rows.parquet")
+table = pq.read_table("/Users/arjunshah/Documents/UTS/Thesis/neural-sdes/data/deribit_options_2025-01-30_100k_rows.parquet")
 
 
 # Convert to pandas DataFrame
@@ -97,14 +97,53 @@ best = best[['timestamp', 'node_idx', 'lattice_tau', 'lattice_m', 'mid_price']]
 best['timestamp'] = pd.to_datetime(best['timestamp'])
 
 # Pivot to get a sparse lattice DataFrame (NaNs left in place)
-C_sparse = best.pivot(
-    index = 'timestamp',
-    columns = 'node_idx',
-    values = 'mid_price'
+counts = df['node_idx'].value_counts()
+K = 50
+top_nodes = counts.nlargest(K).index
+df_sub    = df[df['node_idx'].isin(top_nodes)]
+C_sparse = (
+    df_sub
+      .sort_values('open_interest', ascending=False)
+      .drop_duplicates(['timestamp','node_idx'])
+      .pivot_table(
+         'mid_price',        # values
+         'timestamp',        # index
+         'node_idx',         # columns
+         aggfunc='first'
+      )
 )
 
-# Mask zeros as NaN so interpolation will fill them
-C_sparse = C_sparse.replace(0, np.nan)
+nodes = np.array(nodes)  # shape (50,2)
+m_grid = m_grid          # dict mapping each tau → 10 m-values
+
+# **NEW**: remember the full lattice
+nodes_full  = nodes.copy()
+m_grid_full = {τ: m_grid[τ].copy() for τ in m_grid}
+# 0) Drop any node-columns that were never observed
+never_obs = C_sparse.columns[C_sparse.isna().all()].astype(int)
+if len(never_obs) > 0:
+    print(f"Dropping never-observed nodes: {list(never_obs)}")
+    C_sparse = C_sparse.drop(columns=never_obs)
+
+# 1) Rebuild `nodes`, `tau_grid`, `m_grid` to match the surviving columns
+#    (you must have kept your original `nodes_full` array and `m_grid_full` dict)
+present_idx = C_sparse.columns.to_numpy().astype(int)
+
+nodes = nodes_full[present_idx]   # keep only those node coordinates
+tau_grid = np.unique(nodes[:,0])
+
+m_grid = {
+    τ: sorted(nodes[nodes[:,0]==τ, 1].tolist())
+    for τ in tau_grid
+}
+
+# 2) Time-interpolate and fill
+C_interp = (
+    C_sparse
+      .interpolate(method='linear', axis=0)
+      .ffill()
+      .bfill()
+)
 
 
 def build_noarb_constraints(nodes, tau_grid, m_grid):
@@ -174,17 +213,11 @@ def build_noarb_constraints(nodes, tau_grid, m_grid):
 
 A, b = build_noarb_constraints(nodes, tau_grid, m_grid)
 
-# 1) Create the time-interpolated, fully-filled DataFrame
-C_interp = (
-    C_sparse
-      .interpolate(method='linear', axis=0)  # linear in time
-      .ffill()                               # carry last valid forward
-      .bfill()                               # fill any leading NaNs
-)
+
 
 # ensure it has every node-column 0…n_nodes-1
 n_nodes = nodes.shape[0]
-C_interp = C_interp.reindex(columns=range(n_nodes))
+# C_interp = C_interp.reindex(columns=range(n_nodes))
 total_nans = C_interp.isna().sum().sum()
 print(f"Total NaNs in C_interp: {total_nans:,}")
 
@@ -192,70 +225,128 @@ print(f"Total NaNs in C_interp: {total_nans:,}")
 all_nan_cols = C_interp.columns[C_interp.isna().all()]
 print("Nodes never observed:", list(all_nan_cols))
 
-# # --- 3) Loop over each timestamp, project onto the no‐arb polytope ---
-# C_arb = []
-# for t, row in C_interp.iterrows():
-#     c_raw = row.values.astype(float)           # length n_nodes, no NaNs
+# --- 3) Loop over each timestamp, project onto the no‐arb polytope ---
+C_arb = []
+for t, row in C_interp.iterrows():
+    c_raw = row.values.astype(float)           # length n_nodes, no NaNs
 
-#     # define and solve the QP:  minimize ‖c - c_raw‖²  s.t. A c ≥ b,  c ≥ 0
-#     c = cp.Variable(n_nodes)
-#     obj  = cp.Minimize(cp.sum_squares(c - c_raw))
-#     cons = [A @ c >= b, c >= 0]
-#     prob = cp.Problem(obj, cons)
+    # define and solve the QP:  minimize ‖c - c_raw‖²  s.t. A c ≥ b,  c ≥ 0
+    c = cp.Variable(n_nodes)
+    obj  = cp.Minimize(cp.sum_squares(c - c_raw))
+    cons = [A @ c >= b, c >= 0]
+    prob = cp.Problem(obj, cons)
 
-#     # try OSQP first (install via `pip install osqp` if needed)
-#     try:
-#         prob.solve(solver=cp.OSQP, verbose=True)
-#     except Exception:
-#         prob.solve(solver=cp.SCS, verbose=True, eps_abs=1e-5, eps_rel=1e-5)
+    # try OSQP first (install via `pip install osqp` if needed)
+    try:
+        prob.solve(solver=cp.OSQP, verbose=False)
+    except Exception:
+        prob.solve(solver=cp.SCS, verbose=False, eps_abs=1e-5, eps_rel=1e-5)
 
-#     if prob.status in ["optimal", "optimal_inaccurate"]:
-#         C_arb.append(c.value)
-#     else:
-#         # fall back to raw if solver fails
-#         C_arb.append(c_raw)
+    if prob.status in ["optimal", "optimal_inaccurate"]:
+        C_arb.append(c.value)
+    else:
+        # fall back to raw if solver fails
+        C_arb.append(c_raw)
 
-# # Stack into array and build DataFrame
-# C_arb = np.vstack(C_arb)                      # shape [T, n_nodes]
-# C_arb_df = pd.DataFrame(
-#     C_arb,
-#     index   = C_interp.index,
-#     columns = C_interp.columns
-# )
+# Stack into array and build DataFrame
+C_arb = np.vstack(C_arb)                      # shape [T, n_nodes]
+C_arb_df = pd.DataFrame(
+    C_arb,
+    index   = C_interp.index,
+    columns = C_interp.columns
+)
 
+surf_tensor_af = torch.from_numpy(C_arb_df.values).float()
+torch.save(surf_tensor_af, "surf_tensor_af.pt")
+
+# We now extract the timesteps between observed option snapshot
+timestamps = C_interp.index.to_series()
+
+# Compute raw delta t in seconds (or fractions of a second) between each row
+dt_secs = timestamps.diff().dt.total_seconds().to_numpy()
+
+# the first value for dt is na so we just assume that its the same as the next value
+dt_secs[0] = dt_secs[1]
+
+dt_secs = dt_secs.astype(np.float32)
+
+# Convert to tensor
+dt_tensor = torch.from_numpy(dt_secs).float()
+
+# Save
+torch.save(dt_tensor, "dt.pt")
+
+
+
+
+ # ---------------------------------------------------------------------------------- 
+ # Checking for violations of the no-arbitrage conditions
+ # ----------------------------------------------------------------------------------
+# build an array of the global node‐indices that are actually present
+present_idx   = C_arb_df.columns.to_numpy().astype(int)     # e.g. [0,1,3,4,...,49] but not 12
+present_nodes = nodes_full[present_idx]                    # shape (n_present,2)
+
+violations = {"tau<0":0, "dm>0":0, "d2m<0":0}
+t0 = C_arb_df.index[0]   # just check at the first timestamp
+
+# 1) monotonicity in m & convexity in m, _per_ τ
+for τ in np.unique(present_nodes[:,0]):
+    # find which present columns lie at this τ
+    mask        = np.isclose(present_nodes[:,0], τ)
+    cols_global = present_idx[mask]          # global column indices
+    ms          = present_nodes[mask,1]
+    order       = np.argsort(ms)
+    cols        = cols_global[order]         # sorted by m
+
+    prices = C_arb_df.loc[t0, cols].values   # length = len(cols)
+
+    # ∂C/∂m ≤ 0  →  price[j+1] - price[j] ≤ 0
+    diffs = np.diff(prices)
+    violations["dm>0"] += np.sum(diffs > 1e-8)
+
+    # ∂²C/∂m² ≥ 0  →  price[j-1] - 2 price[j] + price[j+1] ≥ 0
+    d2 = prices[:-2] - 2*prices[1:-1] + prices[2:]
+    violations["d2m<0"] += np.sum(d2 < -1e-8)
+
+# 2) monotonicity in τ, _per_ m
+for m in np.unique(present_nodes[:,1]):
+    mask        = np.isclose(present_nodes[:,1], m)
+    cols_global = present_idx[mask]
+    taus        = present_nodes[mask,0]
+    order       = np.argsort(taus)
+    cols        = cols_global[order]
+
+    prices = C_arb_df.loc[t0, cols].values
+
+    # ∂C/∂τ ≥ 0  →  price[j+1] - price[j] ≥ 0
+    diffs = np.diff(prices)
+    violations["tau<0"] += np.sum(diffs < -1e-8)
+
+print("Violations:", violations)
 
 # import matplotlib.pyplot as plt
 # import matplotlib.tri as mtri
-# from mpl_toolkits.mplot3d import Axes3D  # noqa: unused import but needed for 3D projection
+# from mpl_toolkits.mplot3d import Axes3D  # noqa
 
-# # (Or, in a script, turn on interactive mode)
-# # plt.ion()
+# # 1) grab your repaired DataFrame and the full lattice
+# col_idx       = C_arb_df.columns.to_numpy().astype(int)
+# nodes_present = nodes_full[col_idx]   # shape (49,2) if you dropped one node
 
-# # 1) choose your time‐slice
-# t0_idx = 0
-# y_obs = C_arb_df.iloc[t0_idx].values        # length = n_nodes
-
-# # 2) recover the node coordinates
-# col_idx       = C_arb_df.columns.to_numpy().astype(int)  # [0,1,…,49]
-# nodes_present = nodes[col_idx]                           # shape (50,2)
 # taus_p = nodes_present[:,0]
 # ms_p   = nodes_present[:,1]
 
-# # 3) triangulate the irregular grid
-# tri = mtri.Triangulation(taus_p, ms_p)
+# # 2) values at t₀
+# t0_idx = 0
+# y_obs  = C_arb_df.iloc[t0_idx].values
 
-# # 4) plot in an interactive figure
+# # 3) triangulate & plot
+# tri = mtri.Triangulation(taus_p, ms_p)
 # fig = plt.figure(figsize=(8,6))
 # ax  = fig.add_subplot(111, projection='3d')
-# surf = ax.plot_trisurf(
-#     tri, y_obs,
-#     linewidth=0.2, antialiased=True,
-# )
-
-# ax.set_xlabel('τ (years to expiry)')
+# ax.plot_trisurf(tri, y_obs, linewidth=0.2, antialiased=True)
+# ax.set_xlabel('τ (yrs)')
 # ax.set_ylabel('m = log(K/F)')
-# ax.set_zlabel('Call Price (arb-free)')
-# ax.set_title(f'Arbitrage-Free Lattice Surface at t₀ (idx={t0_idx})')
-
+# ax.set_zlabel('Call Price (arb‐free)')
+# ax.set_title(f'Arb‐free Surface at t₀ (idx={t0_idx})')
 # plt.tight_layout()
 # plt.show()
