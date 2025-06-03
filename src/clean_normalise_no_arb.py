@@ -38,6 +38,15 @@ df['strike'] = pd.to_numeric(df['strike'], errors = 'coerce')
 # Define log moneyness, 'm'
 df['m'] = np.log(df['strike'] / df['underlying_price'])
 
+# Extract the underlying price 
+unique_times = df.drop_duplicates(subset='timestamp').reset_index(drop=True)
+underlying = unique_times['index_price'].values
+
+# Save the underlying price as a tensor
+underlying_tensor = torch.tensor(underlying, dtype=torch.float32)
+torch.save(underlying_tensor, "underlying_price.pt")
+
+
 # # Choose tau grid based on Kmeans clustering
 
 unique_taus = np.sort(df['tau'].unique()).reshape(-1,1)
