@@ -18,7 +18,7 @@ def read_parquet(file_path):
     return df
 
 # Cleaning function for Deribit options data
-def clean_deribit(df):
+def clean_deribit(df, r=0, q=0):
 
     # Seperate Option Type, Strike and Maturity
     df[['asset', 'expiry', 'strike', 'option_type']] = df['instrument_name'].str.split('-', expand=True)
@@ -27,6 +27,8 @@ def clean_deribit(df):
     df['expiry'] = pd.to_datetime(df['expiry'])
     reference_date = pd.to_datetime("2025-01-30")
     df['tau'] = (df['expiry'] - reference_date).dt.days / 365.25  # Crypto is traded 24/7
+
+    df['F'] = df['underlying_price'] * np.exp((r - q) * df['tau'])
 
     # Filter for just calls and usd volume > 0 
     df = df[(df['option_type'] == 'C') & (df['stats_volume_usd'] > 0)]
@@ -38,7 +40,9 @@ def clean_deribit(df):
     df['strike'] = pd.to_numeric(df['strike'], errors='coerce')
 
     # Define log moneyness, 'm'
-    df['m'] = np.log(df['strike'] / df['underlying_price'])
+    df['m'] = np.log(df['strike'] / df['F'])
+
+    df['c_tilde'] = df['mid_price'] / df['F']
 
     return df
 
@@ -95,7 +99,7 @@ def apply_lattice(df, nn, nodes, tau_grid, m_grid,
     # pivot to sparse C
     top_nodes = df['node_idx'].value_counts().nlargest(top_K).index
     sub       = best[best['node_idx'].isin(top_nodes)]
-    C_sparse  = sub.pivot_table('mid_price','timestamp','node_idx')
+    C_sparse  = sub.pivot_table('c_tilde','timestamp','node_idx')
     
     # drop never observed & rebuild sub-nodes, sub grids
     never_obs = C_sparse.columns[C_sparse.isna().all()]

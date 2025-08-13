@@ -130,7 +130,7 @@ def projection_fast_cvxpy(C_interp, nodes, tau_grid, m_grid):
     # 3) Define the problem once
     c_var = cp.Variable(n)
     objective = cp.Minimize(cp.sum_squares(c_var - c_raw))
-    constraints = [A @ c_var >= b, c_var >= 0]
+    constraints = [A @ c_var >= b, c_var >= 0, c_var<=1]
     prob = cp.Problem(objective, constraints)
 
     # 4) Solve repeatedly with warm_start
