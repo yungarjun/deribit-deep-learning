@@ -34,7 +34,7 @@ def clean_deribit(df, r=0, q=0):
     df = df[(df['option_type'] == 'C') & (df['stats_volume_usd'] > 0)]
 
     # Define mid price
-    df['mid_price'] = (df['best_bid_price'] + df['best_ask_price']) / 2
+    df['mid_price'] = ((df['best_bid_price'] + df['best_ask_price']) / 2) 
 
     # Convert strike to numeric
     df['strike'] = pd.to_numeric(df['strike'], errors='coerce')
@@ -42,7 +42,8 @@ def clean_deribit(df, r=0, q=0):
     # Define log moneyness, 'm'
     df['m'] = np.log(df['strike'] / df['F'])
 
-    df['c_tilde'] = df['mid_price'] / df['F']
+    df['c_tilde'] = df['mid_price']
+
 
     return df
 
@@ -74,6 +75,47 @@ def build_lattice_grid(df, n_tau=5, n_m=5, top_K=50):
     
     return nn, nodes, tau_grid, m_grid
 
+def build_lattice_grid(df, n_tau=5, n_m=5, top_K=50):
+    """
+    Learn a *sorted* τ-grid and consistent labels, then build m-grids, nodes, and a 1-NN snapper.
+    """
+    df = df.copy()
+
+    # --- 1) KMeans on τ, then sort centers and RELABEL ---
+    unique_taus = np.sort(df['tau'].unique()).reshape(-1, 1)
+    km = KMeans(n_clusters=n_tau, random_state=0).fit(unique_taus)
+
+    centers = km.cluster_centers_.flatten()          # unsorted centers
+    order   = np.argsort(centers)                    # permutation that sorts them
+    tau_grid = centers[order]                        # sorted centers, shape [n_tau]
+
+    # map old label -> new sorted label
+    old2new = {old: new for new, old in enumerate(order)}
+
+    # label every row via KMeans.predict, then remap to sorted indices
+    raw_lab = km.predict(df[['tau']].values)         # 0..n_tau-1 (arbitrary order)
+    df['tau_cluster'] = np.array([old2new[l] for l in raw_lab], dtype=int)
+
+    # --- 2) m-grid per sorted τ-cluster (use robust percentiles) ---
+    m_grid = {}
+    for i, τ in enumerate(tau_grid):
+        sub = df[df['tau_cluster'] == i]
+        if len(sub) == 0:
+            # fallback if cluster empty (rare): borrow global range
+            lo, hi = np.percentile(df['m'], [1, 99])
+        else:
+            lo, hi = np.percentile(sub['m'], [1, 99])
+        m_grid[τ] = np.linspace(lo, hi, n_m)
+
+    # --- 3) build nodes and a 1-NN snapper on the rectangular-in-index lattice ---
+    nodes = np.vstack([[τ, m] for τ in tau_grid for m in m_grid[τ]])
+
+    from sklearn.neighbors import NearestNeighbors
+    nn = NearestNeighbors(n_neighbors=1).fit(nodes)
+
+    return nn, nodes, tau_grid, m_grid
+
+
 def apply_lattice(df, nn, nodes, tau_grid, m_grid, 
                   top_K=50, fill_method="linear"):
     """
@@ -93,11 +135,15 @@ def apply_lattice(df, nn, nodes, tau_grid, m_grid,
     best = (
       df.sort_values('stats_volume_usd', ascending=False)
         .drop_duplicates(['timestamp','node_idx'])
-        .assign(timestamp=pd.to_datetime(df['timestamp']))
+        # .assign(timestamp=pd.to_datetime(df['timestamp']))
     )
+
+    best['timestamp'] = pd.to_datetime(best['timestamp'])
     
     # pivot to sparse C
-    top_nodes = df['node_idx'].value_counts().nlargest(top_K).index
+    # top_nodes = df['node_idx'].value_counts().nlargest(top_K).index
+    # sub       = best[best['node_idx'].isin(top_nodes)]
+    top_nodes = best['node_idx'].value_counts().nlargest(top_K).index
     sub       = best[best['node_idx'].isin(top_nodes)]
     C_sparse  = sub.pivot_table('c_tilde','timestamp','node_idx')
     
